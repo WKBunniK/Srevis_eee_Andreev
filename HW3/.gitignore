@@ -1,0 +1,11 @@
+.env
+.venv/
+.tools/
+__pycache__/
+*.pyc
+dist/
+*.log
+.agents/
+.codex/
+.aws/
+generated/

@@ -1,0 +1,10 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+grpcio==1.71.0
+grpcio-tools==1.71.0
+protobuf==5.29.4
+psycopg[binary]==3.2.7
+alembic==1.15.2
+SQLAlchemy==2.0.40
+email-validator==2.2.0
+redis==5.2.1

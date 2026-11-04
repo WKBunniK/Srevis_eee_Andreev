@@ -1,0 +1,191 @@
+name: flight-booking-hw3
+x-cache-hosts: &cache-hosts
+  redis-master: ${REDIS_SUBNET_PREFIX:-172.30.93}.10
+  redis-replica: ${REDIS_SUBNET_PREFIX:-172.30.93}.11
+  sentinel-1: ${REDIS_SUBNET_PREFIX:-172.30.93}.21
+  sentinel-2: ${REDIS_SUBNET_PREFIX:-172.30.93}.22
+  sentinel-3: ${REDIS_SUBNET_PREFIX:-172.30.93}.23
+services:
+  flight-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: flight
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: ${FLIGHT_DB_PASSWORD:-flight_demo}
+    volumes:
+      - flight-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U flight -d flight']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  booking-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: booking
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD:-booking_demo}
+    volumes:
+      - booking-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U booking -d booking']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  flight:
+    build: .
+    networks: [default, cache]
+    extra_hosts: *cache-hosts
+    command: [sh, -c, 'python -m common.migrate flight && python -m flight.server']
+    environment:
+      DATABASE_URL: postgresql://flight:${FLIGHT_DB_PASSWORD:-flight_demo}@flight-db:5432/flight
+      FLIGHT_API_KEY: ${FLIGHT_API_KEY:-local-homework-key-change-me}
+      REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+      REDIS_MASTER_NAME: flights
+      CACHE_TTL_SECONDS: '300'
+    depends_on:
+      flight-db:
+        condition: service_healthy
+      sentinel-1:
+        condition: service_healthy
+      sentinel-2:
+        condition: service_healthy
+      sentinel-3:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -m, scripts.healthcheck, flight]
+      interval: 3s
+      timeout: 6s
+      retries: 20
+  booking:
+    build: .
+    command: [sh, -c, 'python -m common.migrate booking && uvicorn booking.app:app --host 0.0.0.0 --port 8000']
+    environment:
+      DATABASE_URL: postgresql://booking:${BOOKING_DB_PASSWORD:-booking_demo}@booking-db:5432/booking
+      FLIGHT_API_KEY: ${FLIGHT_API_KEY:-local-homework-key-change-me}
+      FLIGHT_GRPC_TARGET: flight:50051
+      GRPC_TIMEOUT_SECONDS: '5'
+    ports:
+      - '127.0.0.1:${BOOKING_PORT:-8000}:8000'
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      flight:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -m, scripts.healthcheck, booking]
+      interval: 3s
+      timeout: 6s
+      retries: 20
+  redis-master:
+    build: ./redis
+    networks:
+      cache:
+        ipv4_address: ${REDIS_SUBNET_PREFIX:-172.30.93}.10
+    extra_hosts: *cache-hosts
+    environment:
+      REDIS_HOSTNAME: redis-master
+    volumes:
+      - redis-master-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis-replica:
+    build: ./redis
+    networks:
+      cache:
+        ipv4_address: ${REDIS_SUBNET_PREFIX:-172.30.93}.11
+    extra_hosts: *cache-hosts
+    environment:
+      REDIS_HOSTNAME: redis-replica
+      REDIS_INITIAL_MASTER: redis-master
+    volumes:
+      - redis-replica-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  sentinel-1:
+    build: ./redis
+    networks:
+      cache:
+        ipv4_address: ${REDIS_SUBNET_PREFIX:-172.30.93}.21
+    extra_hosts: *cache-hosts
+    entrypoint: [/usr/local/bin/start-sentinel.sh]
+    environment:
+      SENTINEL_HOSTNAME: sentinel-1
+    volumes:
+      - sentinel-1-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, -p, '26379', ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  sentinel-2:
+    build: ./redis
+    networks:
+      cache:
+        ipv4_address: ${REDIS_SUBNET_PREFIX:-172.30.93}.22
+    extra_hosts: *cache-hosts
+    entrypoint: [/usr/local/bin/start-sentinel.sh]
+    environment:
+      SENTINEL_HOSTNAME: sentinel-2
+    volumes:
+      - sentinel-2-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, -p, '26379', ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  sentinel-3:
+    build: ./redis
+    networks:
+      cache:
+        ipv4_address: ${REDIS_SUBNET_PREFIX:-172.30.93}.23
+    extra_hosts: *cache-hosts
+    entrypoint: [/usr/local/bin/start-sentinel.sh]
+    environment:
+      SENTINEL_HOSTNAME: sentinel-3
+    volumes:
+      - sentinel-3-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, -p, '26379', ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  flight-data:
+  booking-data:
+  redis-master-data:
+  redis-replica-data:
+  sentinel-1-data:
+  sentinel-2-data:
+  sentinel-3-data:
+networks:
+  default:
+  cache:
+    ipam:
+      config:
+        - subnet: ${REDIS_SUBNET_PREFIX:-172.30.93}.0/24
