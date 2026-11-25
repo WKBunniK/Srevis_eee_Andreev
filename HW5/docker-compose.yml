@@ -1,0 +1,160 @@
+name: movie-analytics
+
+x-app: &app
+  build: .
+  image: movie-analytics-app:local
+  init: true
+  environment: &environment
+    KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    CLICKHOUSE_URL: http://clickhouse:8123
+    CLICKHOUSE_USER: cinema
+    CLICKHOUSE_PASSWORD: cinema
+    POSTGRES_DSN: postgresql://cinema:cinema@postgres:5432/cinema
+    PYTHONUNBUFFERED: "1"
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.8.3
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: [CMD-SHELL, "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.3
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_HEAP_OPTS: -Xms128m -Xmx256m
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8081/subjects]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    environment:
+      CLICKHOUSE_USER: cinema
+      CLICKHOUSE_PASSWORD: cinema
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse.xml:/etc/clickhouse-server/config.d/cinema.xml:ro,z
+    healthcheck:
+      test: [CMD, clickhouse-client, --user, cinema, --password, cinema, --query, "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema
+      POSTGRES_DB: cinema
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U cinema -d cinema"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  bootstrap:
+    <<: *app
+    command: [python, -m, app.bootstrap]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  producer:
+    <<: *app
+    command: [uvicorn, app.producer:app, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      <<: *environment
+      GENERATOR_ENABLED: ${GENERATOR_ENABLED:-true}
+      GENERATOR_INTERVAL_SECONDS: ${GENERATOR_INTERVAL_SECONDS:-2}
+    ports:
+      - "127.0.0.1:${PRODUCER_PORT:-8005}:8000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  aggregation:
+    <<: *app
+    command: [uvicorn, app.aggregation:app, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      <<: *environment
+      AGGREGATION_INTERVAL_SECONDS: ${AGGREGATION_INTERVAL_SECONDS:-60}
+    ports:
+      - "127.0.0.1:${AGGREGATION_PORT:-8006}:8000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  tests:
+    <<: *app
+    profiles: [test]
+    command: [python, -m, pytest, -q, -p, no:cacheprovider, tests]
+    environment:
+      <<: *environment
+      PRODUCER_URL: http://producer:8000
+      AGGREGATION_URL: http://aggregation:8000
+    depends_on:
+      producer:
+        condition: service_healthy
+      aggregation:
+        condition: service_healthy
+
+volumes:
+  kafka-data:
+  clickhouse-data:
+  postgres-data:
